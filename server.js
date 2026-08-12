@@ -6,7 +6,11 @@ const crypto = require('crypto');
 const root = __dirname;
 const dataDir = path.join(root, 'data');
 const stateFile = path.join(dataDir, 'state.json');
+const authFile = path.join(dataDir, 'auth.json');
 const port = Number(process.env.PORT || 4173);
+const defaultUsername = 'syadmin';
+const minPasswordLength = 10;
+const sessionMaxAge = 30 * 24 * 60 * 60;
 
 function loadDotEnv() {
   const envFile = path.join(root, '.env');
@@ -25,13 +29,13 @@ function loadDotEnv() {
 
 loadDotEnv();
 
-const authUsername = process.env.FACTORY_USERNAME || 'admin';
-const authPassword = process.env.FACTORY_PASSWORD || 'change-me-before-deploy';
+const authUsername = process.env.FACTORY_USERNAME || defaultUsername;
+const authPassword = process.env.FACTORY_PASSWORD || '';
 const authPasswordHash = process.env.FACTORY_PASSWORD_HASH || '';
 const sessionSecret = process.env.FACTORY_SESSION_SECRET || 'local-development-only-change-this-secret';
-const sessionMaxAge = 30 * 24 * 60 * 60;
 
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+if (!fs.existsSync(stateFile)) fs.writeFileSync(stateFile, JSON.stringify({ masters: [], projects: [], overtime: {} }, null, 2), 'utf8');
 
 function send(res, status, type, body, extraHeaders = {}) {
   res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store', ...extraHeaders });
@@ -44,12 +48,17 @@ function sendJson(res, status, value, extraHeaders = {}) {
 
 function safePath(urlPath) {
   const requested = urlPath === '/' ? '/index.html' : urlPath;
+  const rootPath = path.resolve(root);
   const target = path.resolve(root, '.' + requested);
-  return target.startsWith(path.resolve(root)) ? target : null;
+  return target === rootPath || target.startsWith(rootPath + path.sep) ? target : null;
 }
 
-function passwordDigest(value) {
-  return crypto.scryptSync(String(value), sessionSecret, 32).toString('hex');
+function environmentPasswordDigest(value) {
+  return crypto.createHash('sha256').update(`${sessionSecret}:${String(value)}`, 'utf8').digest('base64url');
+}
+
+function filePasswordDigest(value, salt) {
+  return crypto.scryptSync(String(value), String(salt), 32).toString('hex');
 }
 
 function safeEqual(left, right) {
@@ -58,10 +67,47 @@ function safeEqual(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function validCredentials(username, password) {
-  if (!safeEqual(username, authUsername)) return false;
-  const expected = authPasswordHash || passwordDigest(authPassword);
-  return safeEqual(passwordDigest(password), expected);
+function readAuthRecord() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(authFile, 'utf8'));
+    return parsed && parsed.username && parsed.salt && parsed.hash && parsed.version ? { ...parsed, source: 'file' } : null;
+  } catch { return null; }
+}
+
+function configuredCredentials() {
+  const stored = readAuthRecord();
+  if (stored) return stored;
+  return { username: authUsername, source: 'environment', version: 'environment', passwordHash: authPasswordHash, password: authPassword };
+}
+
+function validCredentials(username, password, record) {
+  if (!safeEqual(username, record.username)) return false;
+  if (record.source === 'file') return safeEqual(filePasswordDigest(password, record.salt), record.hash);
+  if (record.passwordHash) return safeEqual(environmentPasswordDigest(password), record.passwordHash);
+  return Boolean(record.password) && safeEqual(password, record.password);
+}
+
+function randomSalt() {
+  return crypto.randomBytes(18).toString('base64url');
+}
+
+function authVersion() {
+  return `${new Date().toISOString()}:${randomSalt()}`;
+}
+
+function saveAuthRecord(username, password) {
+  const salt = randomSalt();
+  const record = { username, salt, hash: filePasswordDigest(password, salt), version: authVersion() };
+  const temporary = authFile + '.tmp';
+  fs.writeFileSync(temporary, JSON.stringify(record, null, 2), 'utf8');
+  fs.renameSync(temporary, authFile);
+  return { ...record, source: 'file' };
+}
+
+function sessionToken(username, authVersionValue) {
+  const payload = Buffer.from(JSON.stringify({ username, authVersion: authVersionValue, expiresAt: Date.now() + sessionMaxAge * 1000 })).toString('base64url');
+  const signature = crypto.createHmac('sha256', sessionSecret).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
 }
 
 function parseCookies(req) {
@@ -76,12 +122,6 @@ function parseCookies(req) {
   return cookies;
 }
 
-function sessionToken(username) {
-  const payload = Buffer.from(JSON.stringify({ username, expiresAt: Date.now() + sessionMaxAge * 1000 })).toString('base64url');
-  const signature = crypto.createHmac('sha256', sessionSecret).update(payload).digest('base64url');
-  return `${payload}.${signature}`;
-}
-
 function sessionUsername(req) {
   const token = parseCookies(req).factory_session;
   if (!token) return null;
@@ -93,7 +133,8 @@ function sessionUsername(req) {
   if (!safeEqual(signature, expected)) return null;
   try {
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    return parsed.username === authUsername && Number(parsed.expiresAt) > Date.now() ? parsed.username : null;
+    const record = configuredCredentials();
+    return parsed.username === record.username && parsed.authVersion === record.version && Number(parsed.expiresAt) > Date.now() ? parsed.username : null;
   } catch { return null; }
 }
 
@@ -128,11 +169,13 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const contentType = String(req.headers['content-type'] || '');
       const values = contentType.includes('application/json') ? JSON.parse(body || '{}') : Object.fromEntries(new URLSearchParams(body));
-      if (!validCredentials(values.username, values.password)) {
+      const record = configuredCredentials();
+      if (!validCredentials(String(values.username || ''), String(values.password || ''), record)) {
         sendJson(res, 401, { ok: false, error: '帳號或密碼錯誤' });
         return;
       }
-      sendJson(res, 200, { ok: true, expiresIn: sessionMaxAge }, { 'Set-Cookie': authCookie(req, sessionToken(authUsername)) });
+      const active = record.source === 'environment' ? saveAuthRecord(record.username, String(values.password)) : record;
+      sendJson(res, 200, { ok: true, expiresIn: sessionMaxAge }, { 'Set-Cookie': authCookie(req, sessionToken(active.username, active.version)) });
     } catch (error) {
       sendJson(res, 400, { ok: false, error: error.message });
     }
@@ -140,7 +183,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/auth/session' && req.method === 'GET') {
-    sendJson(res, 200, { authenticated: Boolean(sessionUsername(req)), expiresIn: sessionMaxAge });
+    const username = sessionUsername(req);
+    sendJson(res, 200, { authenticated: Boolean(username), username, expiresIn: sessionMaxAge });
     return;
   }
 
@@ -150,6 +194,24 @@ const server = http.createServer(async (req, res) => {
   }
 
   const authenticated = Boolean(sessionUsername(req));
+  if (pathname === '/auth/password' && req.method === 'POST') {
+    if (!authenticated) { sendJson(res, 401, { ok: false, error: '需要登入' }); return; }
+    try {
+      const values = JSON.parse(await readBody(req) || '{}');
+      const currentPassword = String(values.currentPassword || '');
+      const newPassword = String(values.newPassword || '');
+      if (newPassword.length < minPasswordLength) { sendJson(res, 400, { ok: false, error: `新密碼至少需要 ${minPasswordLength} 個字元` }); return; }
+      if (newPassword === currentPassword) { sendJson(res, 400, { ok: false, error: '新密碼不可與目前密碼相同' }); return; }
+      const record = configuredCredentials();
+      if (!validCredentials(record.username, currentPassword, record)) { sendJson(res, 401, { ok: false, error: '目前密碼錯誤' }); return; }
+      const active = saveAuthRecord(record.username, newPassword);
+      sendJson(res, 200, { ok: true, message: '密碼已更新' }, { 'Set-Cookie': authCookie(req, sessionToken(active.username, active.version)) });
+    } catch (error) {
+      sendJson(res, 400, { ok: false, error: error.message });
+    }
+    return;
+  }
+
   const protectedRequest = pathname === '/' || pathname === '/index.html' || pathname === '/api/state' || pathname.startsWith('/data/');
   if (!authenticated && protectedRequest) {
     if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {

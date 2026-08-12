@@ -1,5 +1,7 @@
 const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 const COOKIE_NAME = 'factory_session';
+const DEFAULT_USERNAME = 'syadmin';
+const MIN_PASSWORD_LENGTH = 10;
 
 function bytesToBase64Url(bytes) {
   let binary = '';
@@ -29,6 +31,16 @@ async function digest(value) {
 async function sign(value, secret) {
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return bytesToBase64Url(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value))));
+}
+
+function randomSalt() {
+  const bytes = new Uint8Array(18);
+  crypto.getRandomValues(bytes);
+  return bytesToBase64Url(bytes);
+}
+
+function authVersion() {
+  return `${new Date().toISOString()}:${randomSalt()}`;
 }
 
 function equalText(left, right) {
@@ -61,16 +73,48 @@ function cookieHeader(token, request, maxAge = SESSION_MAX_AGE) {
   return `${COOKIE_NAME}=${encodeURIComponent(token)}; Max-Age=${maxAge}; HttpOnly; SameSite=Lax; Path=/${secure}`;
 }
 
-async function passwordMatches(password, env) {
-  const secret = String(env.FACTORY_SESSION_SECRET || 'change-this-secret-before-deploy');
-  const candidate = await digest(`${secret}:${String(password)}`);
-  if (env.FACTORY_PASSWORD_HASH) return equalText(candidate, env.FACTORY_PASSWORD_HASH);
-  return env.FACTORY_PASSWORD ? equalText(String(password), String(env.FACTORY_PASSWORD)) : false;
+async function readAuthRecord(env) {
+  if (!env.DB) return null;
+  const row = await env.DB.prepare('SELECT username, password_salt, password_hash, updated_at FROM auth_settings WHERE id = 1').first();
+  return row?.username && row?.password_salt && row?.password_hash ? {
+    username: String(row.username),
+    salt: String(row.password_salt),
+    hash: String(row.password_hash),
+    version: String(row.updated_at || 'db')
+  } : null;
 }
 
-async function createSession(username, env) {
+async function credentials(env) {
+  const stored = await readAuthRecord(env);
+  if (stored) return { ...stored, source: 'db' };
+  return {
+    username: String(env.FACTORY_USERNAME || DEFAULT_USERNAME),
+    version: 'environment',
+    source: 'environment',
+    passwordHash: env.FACTORY_PASSWORD_HASH ? String(env.FACTORY_PASSWORD_HASH) : '',
+    password: env.FACTORY_PASSWORD ? String(env.FACTORY_PASSWORD) : ''
+  };
+}
+
+async function passwordMatches(password, env, record) {
+  if (record.source === 'db') return equalText(await digest(`${record.salt}:${String(password)}`), record.hash);
+  const secret = String(env.FACTORY_SESSION_SECRET || 'change-this-secret-before-deploy');
+  if (record.passwordHash) return equalText(await digest(`${secret}:${String(password)}`), record.passwordHash);
+  return record.password ? equalText(String(password), record.password) : false;
+}
+
+async function persistInitialPassword(env, record, password) {
+  if (!env.DB || record.source === 'db') return record;
+  const salt = randomSalt();
+  const hash = await digest(`${salt}:${String(password)}`);
+  const version = authVersion();
+  await env.DB.prepare('INSERT INTO auth_settings (id, username, password_salt, password_hash, updated_at) VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING').bind(record.username, salt, hash, version).run();
+  return (await readAuthRecord(env)) || { username: record.username, salt, hash, version, source: 'db' };
+}
+
+async function createSession(username, authVersionValue, env) {
   const expiresAt = Date.now() + SESSION_MAX_AGE * 1000;
-  const payload = base64UrlEncode(JSON.stringify({ username, expiresAt }));
+  const payload = base64UrlEncode(JSON.stringify({ username, authVersion: authVersionValue, expiresAt }));
   const signature = await sign(payload, String(env.FACTORY_SESSION_SECRET || 'change-this-secret-before-deploy'));
   return `${payload}.${signature}`;
 }
@@ -86,7 +130,8 @@ async function sessionUsername(request, env) {
   if (!equalText(signature, expected)) return null;
   try {
     const value = JSON.parse(base64UrlDecode(payload));
-    return value.username === String(env.FACTORY_USERNAME || '') && Number(value.expiresAt) > Date.now() ? value.username : null;
+    const record = await credentials(env);
+    return value.username === record.username && value.authVersion === record.version && Number(value.expiresAt) > Date.now() ? value.username : null;
   } catch { return null; }
 }
 
@@ -114,16 +159,38 @@ export async function onRequest(context) {
     const body = await readJson(request);
     const username = String(body?.username || '');
     const password = String(body?.password || '');
-    const validUser = env.FACTORY_USERNAME && equalText(username, String(env.FACTORY_USERNAME));
-    if (!validUser || !(await passwordMatches(password, env))) return json({ ok: false, error: '帳號或密碼錯誤' }, 401);
-    return json({ ok: true, expiresIn: SESSION_MAX_AGE }, 200, { 'Set-Cookie': cookieHeader(await createSession(username, env), request) });
+    const record = await credentials(env);
+    if (!equalText(username, record.username) || !(await passwordMatches(password, env, record))) return json({ ok: false, error: '帳號或密碼錯誤' }, 401);
+    const active = await persistInitialPassword(env, record, password);
+    return json({ ok: true, expiresIn: SESSION_MAX_AGE }, 200, { 'Set-Cookie': cookieHeader(await createSession(username, active.version, env), request) });
   }
 
-  if (path === '/auth/session' && request.method === 'GET') return json({ authenticated: Boolean(await sessionUsername(request, env)), expiresIn: SESSION_MAX_AGE });
+  if (path === '/auth/session' && request.method === 'GET') {
+    const username = await sessionUsername(request, env);
+    return json({ authenticated: Boolean(username), username, expiresIn: SESSION_MAX_AGE });
+  }
 
   if (path === '/auth/logout' && (request.method === 'POST' || request.method === 'GET')) return json({ ok: true }, 200, { 'Set-Cookie': cookieHeader('', request, 0) });
 
   const authenticated = Boolean(await sessionUsername(request, env));
+  if (path === '/auth/password' && request.method === 'POST') {
+    if (!authenticated) return json({ ok: false, error: '需要登入' }, 401);
+    const body = await readJson(request);
+    const currentPassword = String(body?.currentPassword || '');
+    const newPassword = String(body?.newPassword || '');
+    if (newPassword.length < MIN_PASSWORD_LENGTH) return json({ ok: false, error: `新密碼至少需要 ${MIN_PASSWORD_LENGTH} 個字元` }, 400);
+    if (newPassword === currentPassword) return json({ ok: false, error: '新密碼不可與目前密碼相同' }, 400);
+    if (!env.DB) return json({ ok: false, error: '目前部署未設定 D1，無法變更密碼' }, 503);
+    const record = await credentials(env);
+    if (!(await passwordMatches(currentPassword, env, record))) return json({ ok: false, error: '目前密碼錯誤' }, 401);
+    const active = record.source === 'db' ? record : await persistInitialPassword(env, record, currentPassword);
+    const salt = randomSalt();
+    const hash = await digest(`${salt}:${newPassword}`);
+    const version = authVersion();
+    await env.DB.prepare('UPDATE auth_settings SET username = ?, password_salt = ?, password_hash = ?, updated_at = ? WHERE id = 1').bind(active.username, salt, hash, version).run();
+    return json({ ok: true, message: '密碼已更新' }, 200, { 'Set-Cookie': cookieHeader(await createSession(active.username, version, env), request) });
+  }
+
   if (path === '/api/state') {
     if (!authenticated) return json({ ok: false, error: '需要登入' }, 401);
     try {
