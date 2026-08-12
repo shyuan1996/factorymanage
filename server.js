@@ -10,6 +10,7 @@ const authFile = path.join(dataDir, 'auth.json');
 const port = Number(process.env.PORT || 4173);
 const defaultUsername = 'syadmin';
 const minPasswordLength = 10;
+const stateClientVersion = '2026-08-12-cloud-v1';
 const sessionMaxAge = 30 * 24 * 60 * 60;
 
 function loadDotEnv() {
@@ -235,6 +236,7 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === '/api/state' && req.method === 'PUT') {
     try {
+      if (String(req.headers['x-workboard-client-version'] || '') !== stateClientVersion) { sendJson(res, 409, { ok: false, error: '頁面版本已更新，請重新整理後再儲存' }); return; }
       const parsed = JSON.parse(await readBody(req));
       if (!parsed || !Array.isArray(parsed.masters) || !Array.isArray(parsed.projects)) throw new Error('Invalid state payload');
       const temporary = stateFile + '.tmp';

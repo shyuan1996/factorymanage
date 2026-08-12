@@ -56,7 +56,7 @@ if(location.protocol!=='file:'){
     const serialized=String(payload);
     stateWritePending+=1;
     stateWriteQueue=stateWriteQueue.then(async()=>{
-      const response=await fetch('/api/state',{method:'PUT',headers:{'Content-Type':'application/json'},body:serialized,cache:'no-store'});
+      const response=await fetch('/api/state',{method:'PUT',headers:{'Content-Type':'application/json','X-Workboard-Client-Version':'2026-08-12-cloud-v1'},body:serialized,cache:'no-store'});
       if(!response.ok)throw new Error(`state save failed: ${response.status}`);
     }).catch(error=>{
       console.warn('[workboard] state sync failed',error);

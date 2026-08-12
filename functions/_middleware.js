@@ -2,6 +2,7 @@ const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 const COOKIE_NAME = 'factory_session';
 const DEFAULT_USERNAME = 'syadmin';
 const MIN_PASSWORD_LENGTH = 10;
+const STATE_CLIENT_VERSION = '2026-08-12-cloud-v1';
 
 function bytesToBase64Url(bytes) {
   let binary = '';
@@ -197,6 +198,7 @@ export async function onRequest(context) {
     try {
       if (request.method === 'GET') return json(await readState(env));
       if (request.method === 'PUT') {
+        if (request.headers.get('X-Workboard-Client-Version') !== STATE_CLIENT_VERSION) return json({ ok: false, error: '頁面版本已更新，請重新整理後再儲存' }, 409);
         const state = await readJson(request);
         if (!state || !Array.isArray(state.masters) || !Array.isArray(state.projects)) return json({ ok: false, error: '資料格式不正確' }, 400);
         await writeState(env, state);
