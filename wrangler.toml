@@ -1,0 +1,8 @@
+name = "factory-workboard"
+compatibility_date = "2026-08-12"
+pages_build_output_dir = "."
+
+[[d1_databases]]
+binding = "DB"
+database_name = "factory-workboard-db"
+database_id = "d813c0b3-6caf-4d1f-a741-997226afddb1"
