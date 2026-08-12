@@ -121,4 +121,124 @@ if(location.protocol!=='file:'){
   document.querySelectorAll('header button').forEach(button=>{const label=button.textContent.trim();if(label.includes('匯入資料')||label.includes('匯出資料')||button.title==='下載目前工作資料備份')button.classList.add('backup-action')});
   const style=document.createElement('style');style.textContent='.header-actions{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap;max-width:470px}.header-actions .btn{display:inline-flex!important;align-items:center;justify-content:center;white-space:nowrap}.backup-action{display:none!important}@media(max-width:800px){header{height:auto;min-height:116px;display:grid;grid-template-columns:minmax(0,1fr) minmax(154px,44%);grid-template-rows:auto auto;align-items:start;gap:8px;position:relative;padding-top:12px}header .brand{grid-column:1;grid-row:1;padding-top:4px}.header-actions{grid-column:2;grid-row:1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;max-width:none}.header-actions .btn{min-height:34px;padding:0 6px;font-size:12px}.nav{position:static!important;grid-column:1/-1;grid-row:2;width:100%;margin:0;justify-content:stretch}.nav button{flex:1}.hero{margin-top:8px}}@media(max-width:380px){header{grid-template-columns:minmax(0,1fr) minmax(145px,50%)}.header-actions{gap:4px}.header-actions .btn{font-size:11px;padding:0 4px}}';document.head.appendChild(style);
 })();
-</script><style>.header-actions .btn.backup-action{display:none!important}</style></body></html>
+</script><style>.header-actions .btn.backup-action{display:none!important}</style>
+<script>
+/* Zero-hour items are inventory records: keep the owner/equipment record, but
+   do not put them into a master's schedule, workload, or time display. */
+const isZeroHourItem=item=>Math.max(0,Number(item?.hours)||0)===0;
+
+function itemRow(i={}){
+  const hours=Number.isFinite(Number(i.hours))?Math.max(0,Number(i.hours)):8;
+  return `<div class="item-row" data-id="${esc(i.id||'')}">
+    <div><label>製作物品</label><input class="i-name" required value="${esc(i.name||'')}" placeholder="例如：飲料吧檯"></div>
+    <div><label>負責師傅（0 小時可任選）</label><select class="i-master" required>${data.masters.map(m=>`<option value="${esc(m.id)}" ${String(i.masterId)===String(m.id)?'selected':''}>${esc(m.name)}</option>`).join('')}</select></div>
+    <div><label>開工日期</label><input class="i-start" type="date" required value="${i.start||today()}"></div>
+    <div><label>預計工時（可填 0）</label><input class="i-hours" type="number" min="0" step="0.25" required value="${hours}"></div>
+    <button type="button" class="remove" data-remove-item>×</button>
+  </div>`;
+}
+
+function projectWarn(project){
+  const warnings=[];
+  for(const item of (project?.items||[])){
+    if(isZeroHourItem(item))continue;
+    const plan=scheduled(item),finish=end(item);
+    if(!plan.length||plan[0].date>project.delivery)warnings.push(`${item.name} 在交貨日前沒有排程`);
+    else if(finish&&finish>project.delivery)warnings.push(`${item.name} 預計完工 ${finish}，晚於交貨日`);
+  }
+  return warnings;
+}
+
+function itemDisplayProgress(item){
+  const hours=Math.max(0,Number(item?.hours)||0);
+  if(!hours)return 0;
+  const done=typeof liveDoneHours==='function'?liveDoneHours(item):Math.min(hours,Math.max(0,Number(item.actual)||0));
+  return Math.min(100,Math.round(done/hours*100));
+}
+
+function detail(){
+  const project=data.projects.find(x=>String(x.id)===String(detailId));
+  if(!project)return show('work');
+  const warnings=projectWarn(project);
+  const ordered=[...(project.items||[])].sort((a,b)=>{
+    const ah=isZeroHourItem(a),bh=isZeroHourItem(b);
+    if(ah!==bh)return ah?1:-1;
+    return String(end(a)||'9999').localeCompare(String(end(b)||'9999'));
+  });
+  const itemCards=ordered.map(item=>{
+    const hours=Math.max(0,Number(item.hours)||0),masterInfo=master(item.masterId);
+    const owner=`${esc(masterInfo.name)}／${esc(masterInfo.title||'')}`;
+    if(isZeroHourItem(item))return `<div class="project-item zero-hour-item"><div class="project-item-top"><b>${esc(item.name)}</b><span>${owner}</span></div><div class="hours">預作庫存設備・不排入師傅工時與行事曆</div></div>`;
+    const plan=scheduled(item),first=plan[0],last=plan[plan.length-1],finish=end(item),done=typeof liveDoneHours==='function'?liveDoneHours(item):Math.min(hours,Math.max(0,Number(item.actual)||0)),pct=itemDisplayProgress(item);
+    return `<div class="project-item"><div class="project-item-top"><b>${esc(item.name)}</b><span>${owner}</span></div><div class="hours">送貨日 ${esc(project.delivery||'—')} ・ 預計 ${hours} 小時</div><div class="hours">製作時間：${first?`${first.date} ${first.startTime}`:'—'} → ${last?`${last.date} ${last.endTime}`:'—'}${finish?`（完工 ${finish}）`:''}</div><div class="hours">實際完成 ${Number(done.toFixed(2))}/${hours} 小時 (${pct}%)</div><div class="line" style="margin-top:5px"><i style="width:${pct}%"></i></div></div>`;
+  }).join('');
+  $('#detail').innerHTML=`<div class="detail-top"><button class="back" data-back>← 回到${view==='calendar'?'行事曆':'工作案量'}</button><div class="detail-title"><div><h1>${esc(project.client)}</h1><div class="client">約定交貨／送貨日期：${esc(project.delivery||'—')} ${warnings.length?'<span class="badge warn">交期異常</span>':'<span class="badge">排程正常</span>'}</div></div><div><button class="btn secondary" data-edit="${esc(project.id)}">編輯工作</button></div></div></div><div class="detail-grid"><section class="section"><h2>工作案件資料</h2><div class="info"><div><small>主要業主</small><b>${esc(project.client)}</b></div><div><small>約定交貨日期</small><b>${esc(project.delivery||'—')}</b></div><div><small>品項數量</small><b>${project.items.length} 項</b></div><div><small>交期檢查</small><b>${warnings.length?'需調整排程':'正常'}</b></div></div>${warnings.length?`<div class="project-item" style="margin-top:12px;color:var(--red)"><b>交期提醒</b><br>${warnings.map(x=>esc(x)).join('<br>')}</div>`:''}</section><section class="section"><h2>製作物品與進度（依預計完成先後）</h2><div class="project-items">${itemCards||'<div class="empty">尚未新增製作物品</div>'}</div></section></div>`;
+}
+
+function projectIsComplete(project){
+  const items=project?.items||[],deliveryReached=!project?.delivery||String(project.delivery)<=today();
+  if(!deliveryReached||!items.length)return false;
+  const workItems=items.filter(item=>!isZeroHourItem(item));
+  /* A zero-hour-only record is intentionally completed by the operator when
+     the stored equipment is shipped; it must not auto-complete just because
+     its delivery date has passed. */
+  if(!workItems.length)return items.every(item=>item.status==='complete');
+  return workItems.every(item=>{
+    const finish=end(item);
+    return liveDoneHours(item)>=Number(item.hours)-0.0001&&finishReached(item)&&(!project.delivery||!finish||String(finish)<=String(project.delivery));
+  });
+}
+
+function isTrulyComplete(project){return projectIsComplete(project)}
+function autoProgress(){
+  let changed=false;
+  for(const project of (data.projects||[])){
+    const deliveryReached=!project.delivery||String(project.delivery)<=today();
+    for(const item of (project.items||[])){
+      if(isZeroHourItem(item)){
+        if(Number(item.actual||0)!==0){item.actual=0;changed=true;}
+        /* Preserve an explicit manual completion for inventory-only records. */
+        continue;
+      }
+      const hours=Math.max(0,Number(item.hours)||0),done=liveDoneHours(item),finish=end(item),onTime=finishReached(item)&&deliveryReached&&(!project.delivery||!finish||String(finish)<=String(project.delivery)),nextStatus=done>=hours-0.0001&&onTime?'complete':done>0?'active':'pending';
+      if(Number(item.actual||0)!==done){item.actual=Number(done.toFixed(2));changed=true;}
+      if(item.status!==nextStatus){item.status=nextStatus;changed=true;}
+    }
+    const completed=projectIsComplete(project);
+    if(project.completed!==completed){project.completed=completed;changed=true;}
+  }
+  if(changed)save();
+  return changed;
+}
+
+function rows(){
+  const q=($('#search')?.value||'').trim().toLowerCase();
+  const all=(data.projects||[]).filter(project=>String(project.client||'').toLowerCase().includes(q)&&(workTab==='complete'?isTrulyComplete(project):!isTrulyComplete(project))).sort((a,b)=>String(b.delivery||'').localeCompare(String(a.delivery||'')));
+  const projects=all.slice((workPage-1)*pageSize,workPage*pageSize);
+  if($('#count'))$('#count').textContent=`${all.length} 件`;
+  document.querySelectorAll('[data-work-tab]').forEach(button=>button.className=`btn ${button.dataset.workTab===workTab?'primary':'secondary'}`);
+  if($('#workRows'))$('#workRows').innerHTML=projects.map(project=>{const warnings=projectWarn(project);return `<tr><td><button class="client-link" data-detail="${esc(project.id)}">${esc(project.client)}</button></td><td>${esc(project.delivery||'')}</td><td>${project.items.length} 項</td><td>${warnings.length?'<span class="badge warn">需調整</span>':'<span class="badge">正常</span>'}</td><td>${workTab==='active'?`<button class="detail-link" data-complete-project="${esc(project.id)}">已完成</button> `:''}<button class="detail-link" style="color:var(--red)" data-delete-project="${esc(project.id)}">刪除</button></td></tr>`}).join('')||`<tr><td colspan="5" class="empty">${workTab==='complete'?'尚無已完工案件':'尚無進行中案件'}</td></tr>`;
+  const loads=(data.masters||[]).map(m=>({m,h:(data.projects||[]).flatMap(project=>project.items||[]).filter(item=>item.masterId===m.id&&!isTrulyComplete((data.projects||[]).find(project=>project.items?.some(x=>x.id===item.id)))).reduce((sum,item)=>sum+Math.max(0,(Number(item.hours)||0)-(typeof liveDoneHours==='function'?liveDoneHours(item):Number(item.actual)||0)),0)})),max=Math.max(1,...loads.map(x=>x.h));
+  if($('#loads'))$('#loads').innerHTML=loads.map(x=>`<div class="load"><div class="load-top"><span>${esc(x.m.name)}</span><small>${Number(x.h.toFixed(2))} 小時</small></div><div class="line"><i style="width:${x.h/max*100}%"></i></div></div>`).join('');
+  renderPager(all.length);
+}
+
+/* Keep form submission valid after changing the minimum from 1 to 0. */
+const zeroHourForm=document.querySelector('#projectForm');
+if(zeroHourForm)zeroHourForm.onsubmit=event=>{
+  event.preventDefault();
+  const formRows=[...document.querySelectorAll('#itemRows .item-row')];
+  if(!formRows.length){toast('至少要新增一項製作物品');return;}
+  const id=String($('#projectId').value||''),old=data.projects.find(x=>String(x.id)===id);
+  const items=formRows.map((row,index)=>{
+    const name=row.querySelector('.i-name').value.trim(),oldItem=old?.items?.find(item=>String(item.id)===String(row.dataset.id))||old?.items?.find(item=>item.name===name),hours=Math.max(0,Number(row.querySelector('.i-hours').value)||0);
+    return {id:oldItem?.id||row.dataset.id||`i${Date.now()}${index}`,name,masterId:row.querySelector('.i-master').value,start:row.querySelector('.i-start').value,hours,actual:hours?Number(oldItem?.actual)||0:0,status:hours?(oldItem?.status||'pending'):(oldItem?.status||'pending')};
+  });
+  const project={id:id||`p${Date.now()}`,client:$('#client').value.trim(),delivery:$('#delivery').value,items};
+  if(old)Object.assign(old,project);else data.projects.push(project);
+  save();$('#projectDialog').close();cal=new Date(`${project.delivery}T12:00:00`);renderAll();if(detailId)detail();toast('工作已儲存，0 小時品項不排入工時');
+};
+
+const zeroHourStyle=document.createElement('style');zeroHourStyle.textContent='.zero-hour-item{background:#f7faf8;border-left:3px solid #8aa9a0}.zero-hour-item .hours{color:#58706f;font-style:italic}';document.head.appendChild(zeroHourStyle);
+renderAll();
+</script></body></html>
