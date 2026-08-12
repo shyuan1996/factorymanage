@@ -145,7 +145,8 @@ function isSecureRequest(req) {
 
 function authCookie(req, token, maxAge = sessionMaxAge) {
   const secure = isSecureRequest(req) ? '; Secure' : '';
-  return `factory_session=${encodeURIComponent(token)}; Max-Age=${maxAge}; HttpOnly; SameSite=Lax; Path=/${secure}`;
+  const expires = maxAge > 0 ? new Date(Date.now() + maxAge * 1000).toUTCString() : new Date(0).toUTCString();
+  return `factory_session=${encodeURIComponent(token)}; Max-Age=${maxAge}; Expires=${expires}; HttpOnly; SameSite=Lax; Path=/${secure}`;
 }
 
 function readBody(req) {
@@ -194,6 +195,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   const authenticated = Boolean(sessionUsername(req));
+  if (authenticated && req.method === 'GET' && (pathname === '/login' || pathname === '/login.html')) {
+    res.writeHead(302, { Location: '/' });
+    res.end();
+    return;
+  }
   if (pathname === '/auth/password' && req.method === 'POST') {
     if (!authenticated) { sendJson(res, 401, { ok: false, error: '需要登入' }); return; }
     try {
@@ -242,7 +248,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method !== 'GET') { send(res, 405, 'text/plain; charset=utf-8', 'Method Not Allowed'); return; }
-  if (pathname === '/login.html') {
+  if (pathname === '/login' || pathname === '/login.html') {
     fs.readFile(path.join(root, 'login.html'), (err, content) => err ? send(res, 500, 'text/plain; charset=utf-8', err.message) : send(res, 200, 'text/html; charset=utf-8', content));
     return;
   }

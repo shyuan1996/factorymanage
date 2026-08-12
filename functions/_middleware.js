@@ -70,7 +70,8 @@ function json(value, status = 200, headers = {}) {
 
 function cookieHeader(token, request, maxAge = SESSION_MAX_AGE) {
   const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
-  return `${COOKIE_NAME}=${encodeURIComponent(token)}; Max-Age=${maxAge}; HttpOnly; SameSite=Lax; Path=/${secure}`;
+  const expires = maxAge > 0 ? new Date(Date.now() + maxAge * 1000).toUTCString() : new Date(0).toUTCString();
+  return `${COOKIE_NAME}=${encodeURIComponent(token)}; Max-Age=${maxAge}; Expires=${expires}; HttpOnly; SameSite=Lax; Path=/${secure}`;
 }
 
 async function readAuthRecord(env) {
@@ -207,6 +208,7 @@ export async function onRequest(context) {
     }
   }
 
+  if (authenticated && request.method === 'GET' && (path === '/login' || path === '/login.html')) return Response.redirect(new URL('/', request.url), 302);
   if (!authenticated && (path === '/' || path === '/index.html')) return Response.redirect(new URL('/login.html', request.url), 302);
   return next();
 }
