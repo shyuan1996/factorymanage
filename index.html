@@ -45,44 +45,57 @@ const monthPicker=document.createElement('input');monthPicker.type='month';month
 </script><script>
 /* When served by server.js, keep the same UI backed by data/state.json. */
 if(location.protocol!=='file:'){
-  /* Persist writes in order. Multiple render passes can save in quick succession;
-     unordered PUT requests used to let an older payload overwrite a newer edit. */
+  /* The cloud database is authoritative across devices. Local storage is only a
+     display cache; it must never replay an old phone/computer snapshot on load. */
   const nativeSetItem=Storage.prototype.setItem;
-  const pendingKey=`${STORE}:pending`;
+  localStorage.removeItem(`${STORE}:pending`);
   let stateWriteQueue=Promise.resolve();
-  let localStateGeneration=0;
+  let stateWritePending=0;
+  let cloudStateReady=false;
   const queueStateWrite=payload=>{
     const serialized=String(payload);
-    localStateGeneration+=1;
-    nativeSetItem.call(localStorage,pendingKey,serialized);
+    stateWritePending+=1;
     stateWriteQueue=stateWriteQueue.then(async()=>{
       const response=await fetch('/api/state',{method:'PUT',headers:{'Content-Type':'application/json'},body:serialized,cache:'no-store'});
       if(!response.ok)throw new Error(`state save failed: ${response.status}`);
-      if(localStorage.getItem(pendingKey)===serialized)localStorage.removeItem(pendingKey);
-    }).catch(error=>console.warn('[workboard] state sync failed',error));
+    }).catch(error=>{
+      console.warn('[workboard] state sync failed',error);
+      toast('資料未能同步，請確認網路後再儲存一次');
+    }).finally(()=>{stateWritePending=Math.max(0,stateWritePending-1)});
     return stateWriteQueue;
   };
   Storage.prototype.setItem=function(key,value){
     nativeSetItem.call(this,key,value);
-    if(key===STORE)queueStateWrite(value);
+    /* Ignore automatic calculations made before the latest cloud snapshot has
+       loaded. Explicit saves after initialization overwrite the cloud state. */
+    if(key===STORE&&cloudStateReady)queueStateWrite(value);
   };
   window.queueStateWrite=queueStateWrite;
-  const pendingPayload=localStorage.getItem(pendingKey);
-  const generationAtLoad=localStateGeneration;
-  fetch('/api/state',{cache:'no-store'}).then(response=>response.ok?response.json():null).then(remote=>{
-    if(!remote||!Array.isArray(remote.masters)||!Array.isArray(remote.projects))return;
-    /* A local save (including one made while this GET was in flight) wins. */
-    if(pendingPayload||localStateGeneration!==generationAtLoad)return;
-    data=remote;
-    nativeSetItem.call(localStorage,STORE,JSON.stringify(remote));
-    renderAll();
-  }).catch(error=>console.warn('[workboard] state load failed',error));
-  if(pendingPayload)queueStateWrite(pendingPayload);
+  const refreshCloudState=async(force=false)=>{
+    if(!force&&(stateWritePending>0||document.querySelector('dialog[open]')))return;
+    try{
+      const response=await fetch('/api/state',{cache:'no-store'});
+      if(!response.ok)throw new Error(`state load failed: ${response.status}`);
+      const remote=await response.json();
+      if(!remote||!Array.isArray(remote.masters)||!Array.isArray(remote.projects))throw new Error('invalid cloud state');
+      data=remote;
+      nativeSetItem.call(localStorage,STORE,JSON.stringify(remote));
+      cloudStateReady=true;
+      renderAll();
+    }catch(error){
+      cloudStateReady=true;
+      console.warn('[workboard] state load failed',error);
+    }
+  };
+  window.refreshCloudState=refreshCloudState;
+  refreshCloudState(true);
+  window.addEventListener('focus',()=>refreshCloudState());
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')refreshCloudState()});
 }
 const hiddenMonthLabel=document.querySelector('#month');if(hiddenMonthLabel)hiddenMonthLabel.style.display='none';
 </script><script>
 /* Recover a pre-server browser dataset when the new JSON file is still empty. */
-if(location.protocol!=='file:'){const browserSnapshot=JSON.parse(JSON.stringify(data));setTimeout(()=>{if(browserSnapshot&&browserSnapshot.projects&&browserSnapshot.projects.length&&(!data.projects||!data.projects.length)){data=browserSnapshot;renderAll();localStorage.setItem(STORE,JSON.stringify(data));toast('已恢復原本的工作資料並寫入本機資料夾')}},700)}
+/* Cloud mode never restores an old browser snapshot. A reload always uses D1. */
 </script><script>
 /* Portable backup for moving data between file:// and the local server origin. */
 const backupBar=document.querySelector('.header-actions')||document.querySelector('header>div:last-child');if(backupBar){const exportBtn=document.createElement('button');exportBtn.className='btn secondary';exportBtn.textContent='匯出資料';exportBtn.type='button';exportBtn.title='下載目前工作資料備份';const importBtn=document.createElement('button');importBtn.className='btn secondary';importBtn.textContent='匯入資料';importBtn.type='button';const importInput=document.createElement('input');importInput.type='file';importInput.accept='application/json,.json';importInput.style.display='none';backupBar.insertBefore(exportBtn,backupBar.firstChild);backupBar.insertBefore(importBtn,backupBar.firstChild);backupBar.appendChild(importInput);exportBtn.addEventListener('click',()=>{const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`factory-workboard-backup-${today()}.json`;a.click();URL.revokeObjectURL(url);toast('資料備份已下載')});importBtn.addEventListener('click',()=>importInput.click());importInput.addEventListener('change',()=>{const file=importInput.files[0];if(!file)return;const reader=new FileReader();reader.onload=()=>{try{const imported=JSON.parse(reader.result);if(!Array.isArray(imported.projects)||!Array.isArray(imported.masters))throw new Error('格式不正確');data=imported;localStorage.setItem(STORE,JSON.stringify(data));renderAll();toast('資料已匯入並儲存')}catch(error){toast('匯入失敗：'+error.message)}};reader.readAsText(file);importInput.value=''})}
@@ -241,7 +254,8 @@ function autoProgress(){
     const completed=projectIsComplete(project);
     if(project.completed!==completed){project.completed=completed;changed=true;}
   }
-  if(changed)save();
+  /* Progress is derived from the clock and schedule. Keep it in memory so an
+     idle device can never overwrite a newer manual save from another device. */
   return changed;
 }
 
