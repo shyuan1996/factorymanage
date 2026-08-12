@@ -1,0 +1,8 @@
+{
+  "name": "factory-workboard-local",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "hash-password": "node scripts/hash-password.mjs"
+  }
+}

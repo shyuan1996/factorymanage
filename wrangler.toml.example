@@ -1,0 +1,13 @@
+name = "factory-workboard"
+compatibility_date = "2026-08-12"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "factory-workboard-db"
+database_id = "REPLACE_AFTER_CREATING_D1"
+
+[vars]
+# Set these as encrypted secrets in Cloudflare, not in this file:
+# FACTORY_USERNAME
+# FACTORY_PASSWORD_HASH
+# FACTORY_SESSION_SECRET

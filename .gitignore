@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+data/state.json
+data/*.tmp
+server.log
+server.err
+.dev.vars
+.wrangler

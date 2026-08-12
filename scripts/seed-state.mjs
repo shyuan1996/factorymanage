@@ -1,0 +1,13 @@
+const baseUrl = String(process.env.FACTORY_DEPLOYED_URL || '').replace(/\/$/, '');
+const username = process.env.FACTORY_USERNAME;
+const password = process.env.FACTORY_PASSWORD;
+const statePath = process.env.FACTORY_STATE_PATH || './data/state.json';
+if (!baseUrl || !username || !password) throw new Error('Set FACTORY_DEPLOYED_URL, FACTORY_USERNAME and FACTORY_PASSWORD first.');
+const state = JSON.parse(await (await import('node:fs/promises')).readFile(statePath, 'utf8'));
+const login = await fetch(`${baseUrl}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
+if (!login.ok) throw new Error(`Login failed: ${login.status}`);
+const cookie = login.headers.get('set-cookie')?.split(';')[0];
+if (!cookie) throw new Error('Login response did not include a session cookie.');
+const saved = await fetch(`${baseUrl}/api/state`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify(state) });
+if (!saved.ok) throw new Error(`State upload failed: ${saved.status} ${await saved.text()}`);
+console.log('State uploaded successfully.');

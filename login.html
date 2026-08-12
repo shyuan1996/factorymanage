@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>工廠管理系統｜登入</title>
+  <style>
+    :root{--ink:#143d3f;--teal:#087066;--paper:#f5f7f5;--line:#d9e5e1;--muted:#6c7a7d;--red:#bd4b43}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:linear-gradient(140deg,#e6f0ed,#f7f8f6);color:var(--ink);font:15px/1.5 "Microsoft JhengHei",system-ui,sans-serif}
+    .card{width:min(92vw,420px);padding:30px;border:1px solid var(--line);border-radius:18px;background:#fff;box-shadow:0 20px 60px #143d3f18}
+    h1{margin:0 0 5px;font-size:23px}.sub{color:var(--muted);font-size:13px;margin-bottom:24px}.field{display:flex;flex-direction:column;gap:6px;margin:13px 0}.field label{font-weight:800;font-size:13px}.field input{height:44px;padding:0 11px;border:1px solid #cbdad5;border-radius:8px;font:inherit;color:var(--ink)}.field input:focus{outline:3px solid #08706622;border-color:var(--teal)}button{width:100%;height:44px;border:0;border-radius:8px;background:var(--ink);color:#fff;font:inherit;font-weight:900;cursor:pointer;margin-top:8px}.hint{margin-top:16px;color:var(--muted);font-size:12px}.error{min-height:22px;margin-top:11px;color:var(--red);font-weight:800;font-size:13px}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>工廠管理系統</h1>
+    <div class="sub">請登入後查看生產行事曆與工作案量</div>
+    <form id="loginForm">
+      <div class="field"><label for="username">帳號</label><input id="username" name="username" autocomplete="username" required autofocus></div>
+      <div class="field"><label for="password">密碼</label><input id="password" name="password" type="password" autocomplete="current-password" required></div>
+      <button type="submit">登入</button>
+      <div id="error" class="error" role="alert"></div>
+    </form>
+    <div class="hint">登入後本瀏覽器會保留 30 天；不同設備需各自登入一次。</div>
+  </main>
+  <script>
+    const form=document.querySelector('#loginForm'),error=document.querySelector('#error');
+    form.addEventListener('submit',async event=>{event.preventDefault();error.textContent='';const button=form.querySelector('button');button.disabled=true;try{const response=await fetch('/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:form.username.value,password:form.password.value})});const result=await response.json();if(!response.ok)throw new Error(result.error||'登入失敗');location.href='/'}catch(err){error.textContent=err.message;button.disabled=false}});
+  </script>
+</body>
+</html>
