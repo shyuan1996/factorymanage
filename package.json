@@ -4,5 +4,8 @@
   "scripts": {
     "start": "node server.js",
     "hash-password": "node scripts/hash-password.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.121.0"
   }
 }

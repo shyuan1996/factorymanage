@@ -7,3 +7,5 @@ server.log
 server.err
 .dev.vars
 .wrangler
+.wrangler-config
+node_modules
